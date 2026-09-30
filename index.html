@@ -140,6 +140,24 @@
                 color: #939393;
             }
 
+            .group-options {
+                margin: .4em 0 .2em 1.5em;
+                font: .9rem 'Fira Sans', sans-serif;
+            }
+
+            .group-options label {
+                display: block;
+                margin: .35em 0;
+            }
+
+            .group-options select {
+                margin-left: .5em;
+                max-width: 100%;
+                padding: .25em;
+            }
+
+            .group-options[hidden] { display: none; }
+
             .result-link-container label:after {
                 content: '';
             }
@@ -202,13 +220,69 @@
             "M2_STL-INSTA"
         ];
 
+        const loadGroups = async (checkbox, container) => {
+            container.dataset.state = "loading";
+            container.textContent = "Loading groups…";
+            try {
+                const response = await fetch(`/api/groups?courses=${encodeURIComponent(checkbox.id)}`);
+                if (!response.ok) throw new Error("Unable to load groups");
+                const data = await response.json();
+                const groups = data[checkbox.id];
+                if (!groups || typeof groups !== "object") throw new Error("Invalid groups response");
+                container.replaceChildren();
+                for (const type of ["TD", "TP", "TME"]) {
+                    if (!groups[type]?.length) continue;
+                    const label = document.createElement("label");
+                    label.textContent = `${type} group`;
+                    const select = document.createElement("select");
+                    select.dataset.type = type;
+                    select.setAttribute("aria-label", `${checkbox.id} ${type} group`);
+                    select.add(new Option("All groups", ""));
+                    for (const group of groups[type]) select.add(new Option(`Group ${group}`, group));
+                    label.append(select);
+                    container.append(label);
+                }
+                if (!container.children.length) container.textContent = "No numbered groups detected; all sessions are included.";
+                container.dataset.state = "loaded";
+            } catch {
+                container.textContent = "Groups unavailable. All sessions are included. ";
+                const retry = document.createElement("button");
+                retry.type = "button";
+                retry.textContent = "Retry";
+                retry.addEventListener("click", () => loadGroups(checkbox, container));
+                container.append(retry);
+                container.dataset.state = "error";
+            }
+        };
+
+        const updateGroupControls = () => {
+            document.querySelectorAll('.courses-list input[type=checkbox]').forEach(checkbox => {
+                let container = checkbox.parentElement.querySelector(".group-options");
+                if (!container && checkbox.checked) {
+                    container = document.createElement("div");
+                    container.className = "group-options";
+                    container.setAttribute("aria-live", "polite");
+                    checkbox.parentElement.append(container);
+                    loadGroups(checkbox, container);
+                }
+                if (container) container.hidden = !checkbox.checked;
+            });
+        };
+
         const updatePage = () => {
             const specialty = document.querySelector("input[type=radio]:checked");
+
+            document.querySelector("fieldset.courses-fieldset").disabled = !specialty;
+            document.querySelector(".result-link-container button").disabled = !specialty;
+            if (!specialty) {
+                document.getElementById("link").value = "";
+                return;
+            }
 
             let shouldUpdateCourses = !alternances.includes(specialty.id);
 
             document.querySelector(".courses-fieldset").style.display = shouldUpdateCourses ? "flex" : "none";
-            document.querySelector(".result-link-container").style.maxWidth = shouldUpdateCourses ? "45%" : "75%";
+            document.querySelector(".result-link-container").style.maxWidth = window.matchMedia("(orientation:portrait)").matches ? "95vw" : (shouldUpdateCourses ? "45%" : "75%");
 
             document.querySelector("fieldset.courses-fieldset").disabled = !specialty;
 
@@ -218,13 +292,27 @@
             resultInput.value = baseUrl + "specialty=" + specialty.id;
 
             if (shouldUpdateCourses) {
+                updateGroupControls();
                 const checkedCourses = document.querySelectorAll("input[type=checkbox]:checked");
 
-                if (checkedCourses.length > 15)
+                if (checkedCourses.length > 15) {
+                    document.querySelector(".result-link-container button").disabled = true;
                     return resultInput.value = "Trop d'UE sélectionnées !";
+                }
 
                 else if (checkedCourses.length > 0)
                     resultInput.value += '&courses=' + Array.from(checkedCourses).map(checkbox => checkbox.id).join(',');
+
+                const groups = {};
+                checkedCourses.forEach(checkbox => {
+                    checkbox.parentElement.querySelectorAll(".group-options select").forEach(select => {
+                        if (select.value) {
+                            groups[checkbox.id] ??= {};
+                            groups[checkbox.id][select.dataset.type] = select.value;
+                        }
+                    });
+                });
+                if (Object.keys(groups).length) resultInput.value += '&groups=' + encodeURIComponent(JSON.stringify(groups));
             }
 
             resultInput.style.height = resultInput.scrollHeight + "px";
@@ -232,22 +320,28 @@
             document.querySelector(".result-link-container button").innerHTML = "Copy to clipboard";
         };
 
-        const saveToClipboard = (button) => {
+        const saveToClipboard = async (button) => {
             const linkHolder = document.querySelector("textarea");
 
-            navigator.clipboard.writeText(linkHolder.value);
-            button.innerHTML = "Copied!";
+            try {
+                await navigator.clipboard.writeText(linkHolder.value);
+                button.textContent = "Copied!";
+            } catch {
+                linkHolder.select();
+                button.textContent = "Select and copy the link manually";
+            }
             return false;  // Prevent defaults
         }
 
         window.addEventListener("load", () => {
             document.getElementById("js-checkup").remove();
 
-            document.getElementById("link").readonly = true;
+            document.getElementById("link").readOnly = true;
 
             try {
                 const form = document.getElementById("main-form");
                 form.addEventListener("change", updatePage);
+                updatePage();
             } catch {
                 alert("Can't find form!");
             }
@@ -624,6 +718,7 @@
         <fieldset class="result-link-container">
             <legend>Sync with your calendar</legend>
             <div class="result-link">
+                <p>Select an UE, then choose its TD, TP or TME group below it. Lectures and sessions without a numbered group are always included. “All groups” keeps the complete course calendar.</p>
                 <p id="js-checkup">JavaScript needs to be activated!</p>
                 <label for="link">Your link</label>
                 <textarea placeholder="You link will be here" id="link"></textarea>

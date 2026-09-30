@@ -2,7 +2,7 @@ import { Request, Response, Router } from "express";
 import { DatabaseIndexer } from "../databaseindexer";
 import { config } from "../config";
 import { endpoints } from "../endpoints";
-import { Endpoint } from "../interfaces";
+import { CourseGroups, GroupSelection, getCourseGroups, matchesGroups, parseGroupSelection, sessionTypes } from "../utils/CourseGroups";
 import { GetEventsFromFile } from "../utils/GetEventsFromFile";
 import { IsCourseOIP } from "../utils/IsCourseOIP";
 
@@ -10,15 +10,39 @@ const ICAL = require("ical.js");
 
 const MasterCalAPIController = Router();
 
+MasterCalAPIController.get('/groups', (req: Request, res: Response) => {
+    if (typeof req.query.courses !== "string") return res.status(400).send("Must choose courses.");
+    const courses = [...new Set(req.query.courses.toUpperCase().split(','))];
+    if (courses.length > 15 || courses.some(course => !Object.hasOwn(DatabaseIndexer.index, course))) {
+        return res.status(400).send("Invalid courses.");
+    }
+    const result: Record<string, CourseGroups> = {};
+    const files = new Map<string, any[]>();
+    for (const course of courses) {
+        const filename = DatabaseIndexer.index[course] + ".ics";
+        if (!files.has(filename)) files.set(filename, GetEventsFromFile(filename));
+        result[course] = {};
+        for (const event of files.get(filename)!) {
+            const summary = String(event.getFirstPropertyValue("summary") ?? "");
+            if (summary.match(config.regexCourseCode)?.[1].toUpperCase() !== course) continue;
+            const groups = getCourseGroups(summary);
+            for (const type of sessionTypes) {
+                if (groups[type]) result[course][type] = [...new Set([...(result[course][type] ?? []), ...groups[type]!])]
+                    .sort((a, b) => Number(a) - Number(b));
+            }
+        }
+    }
+    return res.json(result);
+});
+
 MasterCalAPIController.get('/', (req: Request, res: Response) => {
     // Query parameters existence check
-    if (!req.query.specialty)
+    if (typeof req.query.specialty !== "string" || !req.query.specialty)
         return res.status(400) &&
                res.send("Invalid query parameters: Must choose a major.");
 
-    // Enforce type
-    req.query.courses = req.query.courses as string;
-    req.query.specialty = req.query.specialty as string;
+    if (req.query.courses !== undefined && typeof req.query.courses !== "string")
+        return res.status(400).send("Invalid courses parameter.");
 
     // Transform to array of uppercase strings
     const coursesArray = (req.query.courses)
@@ -43,6 +67,16 @@ MasterCalAPIController.get('/', (req: Request, res: Response) => {
         return res.status(400) &&
                res.send("Invalid query parameters: Specialty does not exist or is not supported. " +
                         "Please double check your input.");
+    }
+
+    let groupSelection: GroupSelection;
+    try {
+        groupSelection = parseGroupSelection(req.query.groups, coursesArray);
+    } catch (error) {
+        return res.status(400).send((error as Error).message);
+    }
+    if (queryEndpoint?.isAlternance && Object.keys(groupSelection).length) {
+        return res.status(400).send("Group selection is not supported for alternance calendars.");
     }
 
     const userCalendar = new ICAL.Component("vcalendar");
@@ -75,10 +109,11 @@ MasterCalAPIController.get('/', (req: Request, res: Response) => {
 
         // Add all events that match the course code
         events.forEach((event: any) => {
-            const match = event.getFirstPropertyValue("summary").match(config.regexCourseCode);
+            const summary = String(event.getFirstPropertyValue("summary") ?? "");
+            const match = summary.match(config.regexCourseCode);
 
             // If we detect a course code and it matches with the request, add to the calendar
-            if (match && match[1] == courseCode)
+            if (match && match[1].toUpperCase() == courseCode && matchesGroups(summary, groupSelection[courseCode]))
                 userCalendar.addSubcomponent(event);
         });
     });
